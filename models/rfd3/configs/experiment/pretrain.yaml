@@ -6,7 +6,7 @@ tags: [print-model]
 ckpt_path: null
 
 datasets:
-  diffusion_batch_size_train: 16
+  diffusion_batch_size_train: 4  # Reduced from 16 to avoid OOM
   crop_size: 256
   max_atoms_in_crop: 2560  # ~10x crop size.
   global_transform_args:

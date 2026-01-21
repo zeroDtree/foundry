@@ -19,7 +19,7 @@ association_scheme: ${datasets.global_transform_args.association_scheme}
 # Other:
 n_examples_per_epoch: 2400 # 24000 # 10x as many epochs
 checkpoint_every_n_epochs: 10 #  Less often checkpointing for fewer epochs
-validate_every_n_epochs: 4  # Validate often
+validate_every_n_epochs: 1000000  # Disable validation for pure training
 
 max_epochs: 100_000
 prevalidate: False

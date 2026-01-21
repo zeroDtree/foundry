@@ -4,6 +4,10 @@ defaults:
   - _self_
 
 dataset: 
+  # Disable CIF cache loading for this debug run
+  cif_parser_args:
+    load_from_cache: False
+
   transform:
     # pn_unit-specific Transform pipeline parameters
     crop_contiguous_probability: 0.25
@@ -12,6 +16,8 @@ dataset:
   # Modify: date & clustering parquet
   dataset:
     filters:
+        # DEBUG: Only use locally available PDB files
+      - 'pdb_id in ["1a0i", "7xyz"]'
         # filters common across all PDB datasets
       - 'pdb_id not in ["7rte", "7m5w", "7n5u"]'
       - 'pdb_id not in ["3di3", "5o45", "1z92", "2gy5", "4zxb"]'
