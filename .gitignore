@@ -230,3 +230,5 @@ logs/
 **/CLAUDE.md
 **/.claude
 /data/
+
+/*.pdb
