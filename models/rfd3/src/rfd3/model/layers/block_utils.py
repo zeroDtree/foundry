@@ -232,8 +232,12 @@ def create_attention_indices(
     if (
         chain_ids is not None and len(torch.unique(chain_ids)) > 3
     ):  # Multi-chain structure
-        # Reserve 25% of attention keys for inter-chain interactions
-        k_inter_chain = max(32, k_actual // 4)  # At least 32 inter-chain keys
+        # Reserve 25% of attention keys for inter-chain interactions (at least
+        # 32), but never more than the total budget -- otherwise
+        # k_intra_chain goes negative for small structures (few tokens but
+        # >3 chains), which crashes `torch.topk` in
+        # extend_index_mask_with_neighbours with a negative k.
+        k_inter_chain = min(max(32, k_actual // 4), k_actual)  # At least 32 inter-chain keys, capped by k_actual
         k_intra_chain = k_actual - k_inter_chain
 
         attn_indices = get_sparse_attention_indices_with_inter_chain(
