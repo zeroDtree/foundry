@@ -6,7 +6,7 @@ import torch
 from atomworks.io.utils.io_utils import to_cif_file
 from atomworks.ml.utils.io import apply_sharding_pattern
 from atomworks.ml.utils.misc import hash_sequence
-from beartype.typing import Literal
+from beartype.typing import Literal, cast
 from biotite.structure import AtomArray, AtomArrayStack, stack
 
 from foundry.utils.alignment import weighted_rigid_align
@@ -52,7 +52,7 @@ def get_sharded_output_path(
 
     # Hash the example ID and apply sharding pattern
     example_hash = hash_sequence(example_id)
-    sharded_path = apply_sharding_pattern(example_hash, sharding_pattern)
+    sharded_path = apply_sharding_pattern(Path(example_hash), sharding_pattern)
 
     # Return base_dir / sharded_directories / example_id
     return base_dir / sharded_path.parent / example_id
@@ -99,7 +99,7 @@ def dump_structures(
     base_path: PathLike,
     one_model_per_file: bool,
     extra_fields: list[str] | Literal["all"] = [],
-    file_type: str = "cif.gz",
+    file_type: Literal["cif", "bcif", "cif.gz"] = "cif.gz",
 ) -> None:
     """Dump structures to CIF files, given the coordinates and input AtomArray.
 
@@ -119,7 +119,7 @@ def dump_structures(
         ), "AtomArrayStack or list of AtomArray required when one_model_per_file is True"
         # One model per file —> loop over the diffusion batch
         for i in range(len(atom_arrays)):
-            path = f"{base_path}_model_{i}"
+            path = Path(f"{base_path}_model_{i}")
             to_cif_file(
                 atom_arrays[i],
                 path,
@@ -143,7 +143,7 @@ def dump_trajectories(
     atom_array: AtomArray,
     base_path: Path,
     align_structures: bool = True,
-    file_type: str = "cif.gz",
+    file_type: Literal["cif", "bcif", "cif.gz"] = "cif.gz",
 ) -> None:
     """Write denoising trajectories to CIF files.
 
@@ -165,9 +165,12 @@ def dump_trajectories(
             trajectory_list[0].device
         )
         for step in range(n_steps - 1):
+            # `trajectory_list` is typed `Tensor | np.ndarray`, but every path here
+            # (alignment + the `torch.stack` below) is tensor-only, so the diffusion
+            # trajectories are always tensors when alignment runs.
             trajectory_list[step] = weighted_rigid_align(
-                X_L=trajectory_list[-1],
-                X_gt_L=trajectory_list[step],
+                X_L=cast(torch.Tensor, trajectory_list[-1]),
+                X_gt_L=cast(torch.Tensor, trajectory_list[step]),
                 X_exists_L=X_exists_L,
                 w_L=w_L,
             )
@@ -186,13 +189,16 @@ def dump_trajectories(
 
     #  ... write the trajectories to CIF files, named by epoch, dataset, example_id, and model index (within the diffusion batch)
     for i, trajectory in enumerate(trajectories_split_by_model):
-        if isinstance(trajectory, torch.Tensor):
-            trajectory = trajectory.cpu().numpy()
+        coords = (
+            trajectory.cpu().numpy()
+            if isinstance(trajectory, torch.Tensor)
+            else trajectory
+        )
         atom_array_stack = build_stack_from_atom_array_and_batched_coords(
-            trajectory, atom_array
+            coords, atom_array
         )
 
-        path = f"{base_path}_model_{i}"
+        path = Path(f"{base_path}_model_{i}")
         to_cif_file(
             atom_array_stack, path, file_type=file_type, include_entity_poly=False
         )

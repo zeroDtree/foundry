@@ -6,7 +6,7 @@ only the pairs needed for sparse attention, reducing memory usage from O(L²) to
 """
 
 import math
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -159,7 +159,7 @@ class ChunkedPairwiseEmbedder:
         process_single_m: Optional[nn.Module] = None,
         process_z: Optional[nn.Module] = None,
         pair_mlp: Optional[nn.Module] = None,
-        **kwargs,
+        **kwargs: Any,
     ):
         self.c_atompair = c_atompair
         self.motif_pos_embedder = motif_pos_embedder
@@ -320,6 +320,8 @@ class ChunkedPairwiseEmbedder:
         # 3. Single embedding terms
         if self._sl_cached is not None:
             # Fast path: MLP already run at tokenisation — just index into the result.
+            # _sl_cached and _sm_cached are populated together (see process_single_*).
+            assert self._sm_cached is not None
             # sl_cached [L, c_atompair]: query atom l always maps to row l.
             single_l = self._sl_cached.unsqueeze(0).unsqueeze(2).expand(B, -1, k, -1)
             # sm_cached [L, c_atompair]: key atoms are given by valid_indices [B, L, k].

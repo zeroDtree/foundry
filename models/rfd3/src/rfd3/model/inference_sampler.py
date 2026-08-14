@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 import torch
 from jaxtyping import Float
+from rfd3.inference.symmetry.atom_array import FIXED_ENTITY_ID
 from rfd3.inference.symmetry.symmetry_utils import apply_symmetry_to_xyz_atomwise
 from rfd3.model.cfg_utils import strip_X
 
@@ -59,7 +60,7 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
     """Diffusion sampler that supports optional motif alignment."""
 
     def _construct_inference_noise_schedule(
-        self, device: torch.device, partial_t: float = None
+        self, device: torch.device, partial_t: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Constructs a noise schedule for use during inference.
 
@@ -88,16 +89,18 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
 
         if partial_t is not None:
             # For now, partial t is a global parameter
-            partial_t = float(partial_t.mean())
+            partial_t_value = float(partial_t.mean())
             noise_schedule = t_hat
-            ranked_logger.info("Using partial diffusion with t={}".format(partial_t))
+            ranked_logger.info(
+                "Using partial diffusion with t={}".format(partial_t_value)
+            )
 
             # Debug the noise schedule filtering
             original_schedule_len = len(noise_schedule)
             original_max = noise_schedule.max().item()
             original_min = noise_schedule.min().item()
 
-            noise_schedule = noise_schedule[noise_schedule <= partial_t]
+            noise_schedule = noise_schedule[noise_schedule <= partial_t_value]
 
             new_schedule_len = len(noise_schedule)
             if new_schedule_len > 0:
@@ -112,7 +115,7 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
                 ranked_logger.info(f"Filtered range: [{new_min:.3f}, {new_max:.3f}]")
             else:
                 ranked_logger.warning(
-                    f"No noise schedule steps found with t <= {partial_t}!"
+                    f"No noise schedule steps found with t <= {partial_t_value}!"
                 )
                 ranked_logger.info(
                     f"Original schedule range: [{original_min:.3f}, {original_max:.3f}]"
@@ -276,6 +279,10 @@ class SampleDiffusionWithMotif(SampleDiffusionConfig):
             if self.use_classifier_free_guidance and (
                 self.cfg_t_max is None or c_t > self.cfg_t_max
             ):
+                # CFG mode requires the reference (unconditional) features and
+                # initializer outputs; RFD3.forward provides both only when CFG is on.
+                assert ref_initializer_outputs is not None
+                assert f_ref is not None
                 X_noisy_L_stripped = strip_X(X_noisy_L, f_ref)
 
                 # unconditional forward pass
@@ -362,7 +369,7 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
 
     def __init__(self, sym_step_frac: float = 0.9, **kwargs):
         assert (
-            kwargs.get("gamma_0") > 0.5
+            kwargs.get("gamma_0", 0) > 0.5
         ), "gamma_0 must be greater than 0.5 for symmetry sampling"
         self.sym_step_frac = sym_step_frac
         super().__init__(**kwargs)
@@ -375,9 +382,18 @@ class SampleDiffusionWithSymmetry(SampleDiffusionWithMotif):
         # update symmetric frames to correct for change in global frame
         symmetry_feats = {k: v for k, v in f.items() if "sym" in k}
 
+        # a contiguous motif anchors the frame, so skip the COM recenter (avoids drift)
+        fixed = f.get("is_motif_atom_with_fixed_coord")
+        asu, ent = symmetry_feats["is_sym_asu"], symmetry_feats["sym_entity_id"]
+        held_motif = (
+            not self.allow_realignment
+            and fixed is not None
+            and bool((fixed & asu & (ent != FIXED_ENTITY_ID)).any())
+        )
+
         # apply symmetry frame shift to X_L
         X_L = apply_symmetry_to_xyz_atomwise(
-            X_L, symmetry_feats, partial_diffusion=("partial_t" in f)
+            X_L, symmetry_feats, partial_diffusion=("partial_t" in f) or held_motif
         )
 
         return X_L

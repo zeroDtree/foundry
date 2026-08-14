@@ -41,7 +41,9 @@ ranked_logger = RankedLogger(__name__, rank_zero_only=True)
 # Future hotspot subsampling schemes might want to avoid giving redundant information via (say) bonded atoms
 
 
-def get_hotspot_atoms(atom_array, binder_pn_unit_iid, distance_cutoff=4.5):
+def get_hotspot_atoms(
+    atom_array: AtomArray, binder_pn_unit_iid: str, distance_cutoff: float = 4.5
+) -> np.ndarray:
     """Get hotspot atoms for a given distance cutoff.
 
     Args:
@@ -335,7 +337,7 @@ class PPIFullBinderCropSpatial(Transform):
         self.force_crop = force_crop
         self.max_atoms_in_crop = max_atoms_in_crop
 
-    def check_input(self, data: dict):
+    def check_input(self, data: dict) -> None:
         check_contains_keys(data, ["atom_array"])
         check_is_instance(data, "atom_array", AtomArray)
         check_atom_array_annotation(data, ["pn_unit_iid", "atomize", "atom_id"])
@@ -366,7 +368,9 @@ class PPIFullBinderCropSpatial(Transform):
         crop_info = resize_crop_info_if_too_many_atoms(
             crop_info=crop_info,
             atom_array=atom_array,
-            max_atoms=self.max_atoms_in_crop,
+            # atomworks annotates max_atoms as int, but its own docstring documents
+            # None as "no resizing" — so passing int | None is intended.
+            max_atoms=self.max_atoms_in_crop,  # type: ignore[arg-type]
         )
 
         data["crop_info"] = {"type": self.__class__.__name__} | crop_info
@@ -437,6 +441,8 @@ def crop_spatial_keep_full_binder(
     binder_atom_mask = atom_array.pn_unit_iid == binder_pn_unit_iid
     n_binder_tokens = get_token_count(atom_array[binder_atom_mask])
 
+    crop_center_atom_idx: int | float
+    crop_center_token_idx: int | float
     if force_crop or requires_crop:
         # Get possible crop centers
         can_be_crop_center = get_spatial_crop_center(

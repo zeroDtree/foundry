@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -101,7 +101,7 @@ def rot_vec_mul(r: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
 
 
 def identity_rot_mats(
-    batch_dims: Tuple[int],
+    batch_dims: Tuple[int, ...],
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
     requires_grad: bool = True,
@@ -114,7 +114,7 @@ def identity_rot_mats(
 
 
 def identity_trans(
-    batch_dims: Tuple[int],
+    batch_dims: Tuple[int, ...],
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
     requires_grad: bool = True,
@@ -126,7 +126,7 @@ def identity_trans(
 
 
 def identity_quats(
-    batch_dims: Tuple[int],
+    batch_dims: Tuple[int, ...],
     dtype: Optional[torch.dtype] = None,
     device: Optional[torch.device] = None,
     requires_grad: bool = True,
@@ -146,7 +146,7 @@ _qtr_keys = [l1 + l2 for l1 in _quat_elements for l2 in _quat_elements]
 _qtr_ind_dict = {key: ind for ind, key in enumerate(_qtr_keys)}
 
 
-def _to_mat(pairs):
+def _to_mat(pairs: list[tuple[str, int]]) -> np.ndarray:
     mat = np.zeros((4, 4))
     for pair in pairs:
         key, value = pair
@@ -193,12 +193,12 @@ def quat_to_rot(quat: torch.Tensor) -> torch.Tensor:
 
 def rot_to_quat(
     rot: torch.Tensor,
-):
+) -> torch.Tensor:
     if rot.shape[-2:] != (3, 3):
         raise ValueError("Input rotation is incorrectly shaped")
 
-    rot = [[rot[..., i, j] for j in range(3)] for i in range(3)]
-    [[xx, xy, xz], [yx, yy, yz], [zx, zy, zz]] = rot
+    rot_elements = [[rot[..., i, j] for j in range(3)] for i in range(3)]
+    [[xx, xy, xz], [yx, yy, yz], [zx, zy, zz]] = rot_elements
 
     k = [
         [
@@ -227,9 +227,9 @@ def rot_to_quat(
         ],
     ]
 
-    k = (1.0 / 3.0) * torch.stack([torch.stack(t, dim=-1) for t in k], dim=-2)
+    k_matrix = (1.0 / 3.0) * torch.stack([torch.stack(t, dim=-1) for t in k], dim=-2)
 
-    _, vectors = torch.linalg.eigh(k)
+    _, vectors = torch.linalg.eigh(k_matrix)
     return vectors[..., -1]
 
 
@@ -245,7 +245,7 @@ _QUAT_MULTIPLY[:, :, 3] = [[0, 0, 0, 1], [0, 0, 1, 0], [0, -1, 0, 0], [1, 0, 0, 
 _QUAT_MULTIPLY_BY_VEC = _QUAT_MULTIPLY[:, 1:, :]
 
 
-def quat_multiply(quat1, quat2):
+def quat_multiply(quat1: torch.Tensor, quat2: torch.Tensor) -> torch.Tensor:
     """Multiply a quaternion by another quaternion."""
     mat = quat1.new_tensor(_QUAT_MULTIPLY)
     reshaped_mat = mat.view((1,) * len(quat1.shape[:-1]) + mat.shape)
@@ -255,7 +255,7 @@ def quat_multiply(quat1, quat2):
     )
 
 
-def quat_multiply_by_vec(quat, vec):
+def quat_multiply_by_vec(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     """Multiply a quaternion by a pure-vector quaternion."""
     mat = quat.new_tensor(_QUAT_MULTIPLY_BY_VEC)
     reshaped_mat = mat.view((1,) * len(quat.shape[:-1]) + mat.shape)
@@ -264,11 +264,11 @@ def quat_multiply_by_vec(quat, vec):
     )
 
 
-def invert_rot_mat(rot_mat: torch.Tensor):
+def invert_rot_mat(rot_mat: torch.Tensor) -> torch.Tensor:
     return rot_mat.transpose(-1, -2)
 
 
-def invert_quat(quat: torch.Tensor):
+def invert_quat(quat: torch.Tensor) -> torch.Tensor:
     quat_prime = quat.clone()
     quat_prime[..., 1:] *= -1
     inv = quat_prime / torch.sum(quat**2, dim=-1, keepdim=True)
@@ -327,12 +327,12 @@ class Rotation:
 
     @staticmethod
     def identity(
-        shape,
+        shape: Tuple[int, ...],
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         requires_grad: bool = True,
         fmt: str = "quat",
-    ):
+    ) -> "Rotation":
         """
         Returns an identity Rotation.
 
@@ -369,7 +369,7 @@ class Rotation:
 
     # Magic methods
 
-    def __getitem__(self, index: Any):
+    def __getitem__(self, index: Any) -> "Rotation":
         """
         Allows torch-style indexing over the virtual shape of the rotation
         object. See documentation for the shape property.
@@ -392,7 +392,7 @@ class Rotation:
         else:
             raise ValueError("Both rotations are None")
 
-    def __setitem__(self, index: Any, new: Any):
+    def __setitem__(self, index: Any, new: Any) -> None:
         if not isinstance(index, tuple):
             index = (index,)
 
@@ -406,7 +406,7 @@ class Rotation:
     def __mul__(
         self,
         right: torch.Tensor,
-    ):
+    ) -> "Rotation":
         """
         Pointwise left multiplication of the rotation with a tensor. Can be
         used to e.g. mask the Rotation.
@@ -432,7 +432,7 @@ class Rotation:
     def __rmul__(
         self,
         left: torch.Tensor,
-    ):
+    ) -> "Rotation":
         """
         Reverse pointwise multiplication of the rotation with a tensor.
 
@@ -458,13 +458,12 @@ class Rotation:
         Returns:
             The virtual shape of the rotation object
         """
-        s = None
         if self._quats is not None:
-            s = self._quats.shape[:-1]
+            return self._quats.shape[:-1]
+        elif self._rot_mats is not None:
+            return self._rot_mats.shape[:-2]
         else:
-            s = self._rot_mats.shape[:-2]
-
-        return s
+            raise ValueError("Both rotations are None")
 
     @property
     def dtype(self) -> torch.dtype:
@@ -560,7 +559,7 @@ class Rotation:
         else:
             raise ValueError("Both rotations are None")
 
-    def get_rotvec(self, eps=1e-4) -> torch.Tensor:
+    def get_rotvec(self, eps: float = 1e-4) -> torch.Tensor:
         """
         Return the underlying axis-angle rotation vector.
 
@@ -594,8 +593,8 @@ class Rotation:
         self,
         q_update_vec: torch.Tensor,
         normalize_quats: bool = True,
-        update_mask: torch.Tensor = None,
-    ):
+        update_mask: torch.Tensor | None = None,
+    ) -> "Rotation":
         """
         Returns a new quaternion Rotation after updating the current
         object's underlying rotation with a quaternion update, formatted
@@ -622,7 +621,7 @@ class Rotation:
             normalize_quats=normalize_quats,
         )
 
-    def compose_r(self, r):
+    def compose_r(self, r: "Rotation") -> "Rotation":
         """
         Compose the rotation matrices of the current Rotation object with
         those of another.
@@ -638,7 +637,7 @@ class Rotation:
         new_rot_mats = rot_matmul(r1, r2)
         return Rotation(rot_mats=new_rot_mats, quats=None)
 
-    def compose_q(self, r, normalize_quats: bool = True):
+    def compose_q(self, r: "Rotation", normalize_quats: bool = True) -> "Rotation":
         """
         Compose the quaternions of the current Rotation object with those
         of another.
@@ -685,7 +684,7 @@ class Rotation:
         inv_rot_mats = invert_rot_mat(rot_mats)
         return rot_vec_mul(inv_rot_mats, pts)
 
-    def invert(self):
+    def invert(self) -> "Rotation":
         """
         Returns the inverse of the current Rotation.
 
@@ -708,7 +707,7 @@ class Rotation:
     def unsqueeze(
         self,
         dim: int,
-    ):
+    ) -> "Rotation":
         """
         Analogous to torch.unsqueeze. The dimension is relative to the
         shape of the Rotation object.
@@ -732,9 +731,9 @@ class Rotation:
 
     @staticmethod
     def cat(
-        rs,
+        rs: list["Rotation"],
         dim: int,
-    ):
+    ) -> "Rotation":
         """
         Concatenates rotations along one of the batch dimensions. Analogous
         to torch.cat().
@@ -752,11 +751,11 @@ class Rotation:
             A concatenated Rotation object in rotation matrix format
         """
         rot_mats = [r.get_rot_mats() for r in rs]
-        rot_mats = torch.cat(rot_mats, dim=dim if dim >= 0 else dim - 2)
+        cat_rot_mats = torch.cat(rot_mats, dim=dim if dim >= 0 else dim - 2)
 
-        return Rotation(rot_mats=rot_mats, quats=None)
+        return Rotation(rot_mats=cat_rot_mats, quats=None)
 
-    def map_tensor_fn(self, fn):
+    def map_tensor_fn(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> "Rotation":
         """
         Apply a Tensor -> Tensor function to underlying rotation tensors,
         mapping over the rotation dimension(s). Can be used e.g. to sum out
@@ -783,7 +782,7 @@ class Rotation:
         else:
             raise ValueError("Both rotations are None")
 
-    def cuda(self):
+    def cuda(self) -> "Rotation":
         """
         Analogous to the cuda() method of torch Tensors
 
@@ -799,7 +798,9 @@ class Rotation:
         else:
             raise ValueError("Both rotations are None")
 
-    def to(self, device: Optional[torch.device], dtype: Optional[torch.dtype]):
+    def to(
+        self, device: Optional[torch.device], dtype: Optional[torch.dtype]
+    ) -> "Rotation":
         """
         Analogous to the to() method of torch Tensors
 
@@ -825,7 +826,7 @@ class Rotation:
         else:
             raise ValueError("Both rotations are None")
 
-    def detach(self):
+    def detach(self) -> "Rotation":
         """
         Returns a copy of the Rotation whose underlying Tensor has been
         detached from its torch graph.
@@ -887,7 +888,7 @@ class Rigid:
                 device,
                 requires_grad,
             )
-        elif trans is None:
+        if trans is None:
             trans = identity_trans(
                 batch_dims,
                 dtype,
@@ -906,12 +907,12 @@ class Rigid:
 
     @staticmethod
     def identity(
-        shape: Tuple[int],
+        shape: Tuple[int, ...],
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
         requires_grad: bool = True,
         fmt: str = "quat",
-    ):
+    ) -> "Rigid":
         """
         Constructs an identity transformation.
 
@@ -935,7 +936,7 @@ class Rigid:
     def __getitem__(
         self,
         index: Any,
-    ):
+    ) -> "Rigid":
         """
         Indexes the affine transformation with PyTorch-style indices.
         The index is applied to the shared dimensions of both the rotation
@@ -967,7 +968,7 @@ class Rigid:
     def __mul__(
         self,
         right: torch.Tensor,
-    ):
+    ) -> "Rigid":
         """
         Pointwise left multiplication of the transformation with a tensor.
         Can be used to e.g. mask the Rigid.
@@ -989,7 +990,7 @@ class Rigid:
     def __rmul__(
         self,
         left: torch.Tensor,
-    ):
+    ) -> "Rigid":
         """
         Reverse pointwise multiplication of the transformation with a
         tensor.
@@ -1045,8 +1046,8 @@ class Rigid:
     def compose_q_update_vec(
         self,
         q_update_vec: torch.Tensor,
-        update_mask: torch.Tensor = None,
-    ):
+        update_mask: torch.Tensor | None = None,
+    ) -> "Rigid":
         """
         Composes the transformation with a quaternion update vector of
         shape [*, 6], where the final 6 columns represent the x, y, and
@@ -1071,8 +1072,8 @@ class Rigid:
     def compose_tran_update_vec(
         self,
         t_vec: torch.Tensor,
-        update_mask: torch.Tensor = None,
-    ):
+        update_mask: torch.Tensor | None = None,
+    ) -> "Rigid":
         """
         Composes the transformation with a quaternion update vector of
         shape [*, 3], where columns represent a 3D translation.
@@ -1091,8 +1092,8 @@ class Rigid:
 
     def compose(
         self,
-        r,
-    ):
+        r: "Rigid",
+    ) -> "Rigid":
         """
         Composes the current rigid object with another.
 
@@ -1106,7 +1107,7 @@ class Rigid:
         new_trans = self._rots.apply(r._trans) + self._trans
         return Rigid(new_rot, new_trans)
 
-    def compose_r(self, rot, order="right"):
+    def compose_r(self, rot: Rotation, order: str = "right") -> "Rigid":
         """
         Composes the current rigid object with another.
 
@@ -1153,7 +1154,7 @@ class Rigid:
         pts = pts - self._trans
         return self._rots.invert_apply(pts)
 
-    def invert(self):
+    def invert(self) -> "Rigid":
         """
         Inverts the transformation.
 
@@ -1165,7 +1166,7 @@ class Rigid:
 
         return Rigid(rot_inv, -1 * trn_inv)
 
-    def map_tensor_fn(self, fn):
+    def map_tensor_fn(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> "Rigid":
         """
         Apply a Tensor -> Tensor function to underlying translation and
         rotation tensors, mapping over the translation/rotation dimensions
@@ -1198,7 +1199,7 @@ class Rigid:
         return tensor
 
     @staticmethod
-    def from_tensor_4x4(t: torch.Tensor):
+    def from_tensor_4x4(t: torch.Tensor) -> "Rigid":
         """
         Constructs a transformation from a homogenous transformation
         tensor.
@@ -1234,7 +1235,7 @@ class Rigid:
     def from_tensor_7(
         t: torch.Tensor,
         normalize_quats: bool = False,
-    ):
+    ) -> "Rigid":
         if t.shape[-1] != 7:
             raise ValueError("Incorrectly shaped input tensor")
 
@@ -1250,7 +1251,7 @@ class Rigid:
         origin: torch.Tensor,
         p_xy_plane: torch.Tensor,
         eps: float = 1e-4,
-    ):
+    ) -> "Rigid":
         """
         Implements algorithm 21. Constructs transformations from sets of 3
         points using the Gram-Schmidt algorithm.
@@ -1263,18 +1264,18 @@ class Rigid:
         Returns:
             A transformation object of shape [*]
         """
-        p_neg_x_axis = torch.unbind(p_neg_x_axis, dim=-1)
-        origin = torch.unbind(origin, dim=-1)
-        p_xy_plane = torch.unbind(p_xy_plane, dim=-1)
+        p_neg_x_axis_cols = torch.unbind(p_neg_x_axis, dim=-1)
+        origin_cols = torch.unbind(origin, dim=-1)
+        p_xy_plane_cols = torch.unbind(p_xy_plane, dim=-1)
 
-        e0 = [c1 - c2 for c1, c2 in zip(origin, p_neg_x_axis)]
-        e1 = [c1 - c2 for c1, c2 in zip(p_xy_plane, origin)]
+        e0 = [c1 - c2 for c1, c2 in zip(origin_cols, p_neg_x_axis_cols)]
+        e1 = [c1 - c2 for c1, c2 in zip(p_xy_plane_cols, origin_cols)]
 
-        denom = torch.sqrt(sum((c * c for c in e0)) + eps)
+        denom = torch.sqrt(cast(torch.Tensor, sum(c * c for c in e0)) + eps)
         e0 = [c / denom for c in e0]
         dot = sum((c1 * c2 for c1, c2 in zip(e0, e1)))
         e1 = [c2 - c1 * dot for c1, c2 in zip(e0, e1)]
-        denom = torch.sqrt(sum((c * c for c in e1)) + eps)
+        denom = torch.sqrt(cast(torch.Tensor, sum(c * c for c in e1)) + eps)
         e1 = [c / denom for c in e1]
         e2 = [
             e0[1] * e1[2] - e0[2] * e1[1],
@@ -1287,12 +1288,12 @@ class Rigid:
 
         rot_obj = Rotation(rot_mats=rots, quats=None)
 
-        return Rigid(rot_obj, torch.stack(origin, dim=-1))
+        return Rigid(rot_obj, torch.stack(origin_cols, dim=-1))
 
     def unsqueeze(
         self,
         dim: int,
-    ):
+    ) -> "Rigid":
         """
         Analogous to torch.unsqueeze. The dimension is relative to the
         shared dimensions of the rotation/translation.
@@ -1311,9 +1312,9 @@ class Rigid:
 
     @staticmethod
     def cat(
-        ts,
+        ts: list["Rigid"],
         dim: int,
-    ):
+    ) -> "Rigid":
         """
         Concatenates transformations along a new dimension.
 
@@ -1331,7 +1332,7 @@ class Rigid:
 
         return Rigid(rots, trans)
 
-    def apply_rot_fn(self, fn):
+    def apply_rot_fn(self, fn: Callable[[Rotation], Rotation]) -> "Rigid":
         """
         Applies a Rotation -> Rotation function to the stored rotation
         object.
@@ -1343,7 +1344,7 @@ class Rigid:
         """
         return Rigid(fn(self._rots), self._trans)
 
-    def apply_trans_fn(self, fn):
+    def apply_trans_fn(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> "Rigid":
         """
         Applies a Tensor -> Tensor function to the stored translation.
 
@@ -1356,7 +1357,7 @@ class Rigid:
         """
         return Rigid(self._rots, fn(self._trans))
 
-    def scale_translation(self, trans_scale_factor: float):
+    def scale_translation(self, trans_scale_factor: float) -> "Rigid":
         """
         Scales the translation by a constant factor.
 
@@ -1369,7 +1370,7 @@ class Rigid:
         fn = lambda t: t * trans_scale_factor  # noqa: E731
         return self.apply_trans_fn(fn)
 
-    def stop_rot_gradient(self):
+    def stop_rot_gradient(self) -> "Rigid":
         """
         Detaches the underlying rotation object
 
@@ -1380,7 +1381,12 @@ class Rigid:
         return self.apply_rot_fn(fn)
 
     @staticmethod
-    def make_transform_from_reference(n_xyz, ca_xyz, c_xyz, eps=1e-20):
+    def make_transform_from_reference(
+        n_xyz: torch.Tensor,
+        ca_xyz: torch.Tensor,
+        c_xyz: torch.Tensor,
+        eps: float = 1e-20,
+    ) -> "Rigid":
         """
         Returns a transformation object from reference coordinates.
 
@@ -1450,7 +1456,7 @@ class Rigid:
 
         return Rigid(rot_obj, translation)
 
-    def cuda(self):
+    def cuda(self) -> "Rigid":
         """
         Moves the transformation object to GPU memory
 

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
-from typing import TextIO
+from typing import Any, Literal, TextIO, cast
 
 import pandas as pd
 import torch
@@ -112,7 +112,7 @@ class RF3Output:
     def dump(
         self,
         out_dir: Path,
-        file_type: str = "cif",
+        file_type: Literal["cif", "bcif", "cif.gz"] = "cif",
         dump_full_confidences: bool = True,
     ) -> None:
         """Save output to disk in AlphaFold3-compatible format.
@@ -131,7 +131,7 @@ class RF3Output:
         # Save structure
         to_cif_file(
             self.atom_array,
-            f"{base_path}_model",
+            Path(f"{base_path}_model"),
             file_type=file_type,
             include_entity_poly=False,
         )
@@ -168,7 +168,7 @@ def dump_top_ranked_outputs(
     outputs: list[RF3Output],
     out_dir: Path,
     example_id: str,
-    file_type: str = "cif",
+    file_type: Literal["cif", "bcif", "cif.gz"] = "cif",
 ) -> RF3Output:
     """Copy the top-ranked model and summary to the top-level directory.
 
@@ -205,13 +205,16 @@ def should_early_stop_by_mean_plddt(
 ) -> ShouldEarlyStopFn:
     """Returns a closure that triggers early stopping when mean pLDDT falls below the specified threshold."""
 
-    def fn(confidence_outputs: dict, **kwargs):
+    def fn(
+        confidence_outputs: dict[str, Any],
+        first_recycle_outputs: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
         mean_plddt = get_mean_atomwise_plddt(
             plddt_logits=confidence_outputs["plddt_logits"].unsqueeze(0),
             is_real_atom=is_real_atom,
             max_value=max_value_of_plddt,
         )
-        return (mean_plddt < threshold).item(), {
+        return bool((mean_plddt < threshold).item()), {
             "mean_plddt": mean_plddt.item(),
             "threshold": threshold,
         }
@@ -444,7 +447,9 @@ class RF3InferenceEngine(BaseInferenceEngine):
             skip_existing = False
 
         # Determine file type based on compression setting
-        file_type = "cif.gz" if self.compress_outputs else "cif"
+        file_type: Literal["cif", "bcif", "cif.gz"] = (
+            "cif.gz" if self.compress_outputs else "cif"
+        )
 
         # Convert inputs to InferenceInput objects
         if isinstance(inputs, InferenceInput):
@@ -452,7 +457,8 @@ class RF3InferenceEngine(BaseInferenceEngine):
         elif isinstance(inputs, list) and all(
             isinstance(i, InferenceInput) for i in inputs
         ):
-            inference_inputs = inputs
+            # `all(isinstance(...))` guarantees the element type but mypy can't infer it.
+            inference_inputs = cast(list[InferenceInput], inputs)
         elif isinstance(inputs, AtomArray):
             # Single AtomArray - convert to InferenceInput
             inference_inputs = [
@@ -477,7 +483,8 @@ class RF3InferenceEngine(BaseInferenceEngine):
             isinstance(inputs, list) and isinstance(inputs[0], (str, Path))
         ):
             inference_inputs = prepare_inference_inputs_from_paths(
-                inputs=inputs,
+                # guarded above to str/Path or a list thereof; the loader handles both.
+                inputs=cast("PathLike | list[PathLike]", inputs),
                 existing_outputs_dir=out_dir if skip_existing else None,
                 sharding_pattern=sharding_pattern,
                 template_selection=template_selection,
@@ -516,7 +523,7 @@ class RF3InferenceEngine(BaseInferenceEngine):
         )
 
         # Prepare results dict (if returning in-memory)
-        results = {} if out_dir is None else None
+        results: dict[str, Any] | None = {} if out_dir is None else None
 
         # Main inference loop
         for batch_idx, input_spec in enumerate(loader):
@@ -572,26 +579,29 @@ class RF3InferenceEngine(BaseInferenceEngine):
             # Handle early stopping
             if network_output.get("early_stopped", False):
                 ranked_logger.warning(
-                    f"Early stopping triggered for {input_spec.example_id} "
-                    f"with mean pLDDT {network_output['mean_plddt']:.2f} < "
-                    f"{self.early_stopping_plddt_threshold:.2f}!"
+                    f"Early stopping triggered for {input_spec.example_id}: "
+                    f"mean pLDDT {network_output['mean_plddt']:.2f} is below threshold "
+                    f"{self.early_stopping_plddt_threshold:.2f}. "
+                    f"No structure will be written for this input."
                 )
 
                 if out_dir:
-                    # Save early stop info to disk
-                    dict_to_save = {
-                        k: v for k, v in network_output.items() if v is not None
-                    }
-                    df_to_save = pd.DataFrame([dict_to_save])
-                    df_to_save.to_csv(example_out_dir / "score.csv", index=False)
-
-                    df_to_save = pd.DataFrame([metrics_output])
-                    df_to_save.to_csv(
-                        example_out_dir / f"{input_spec.example_id}_metrics.csv",
+                    # Write a ranking_scores.csv that records the early-stop outcome so
+                    # downstream tooling (and skip_existing) always finds a consistent file.
+                    pd.DataFrame(
+                        [
+                            {
+                                "early_stopped": True,
+                                "mean_plddt": network_output.get("mean_plddt"),
+                            }
+                        ]
+                    ).to_csv(
+                        example_out_dir / f"{input_spec.example_id}_ranking_scores.csv",
                         index=False,
                     )
                 else:
-                    # Store in results dict
+                    # Store in results dict (results is the in-memory dict iff out_dir is None)
+                    assert results is not None
                     results[input_spec.example_id] = {
                         "early_stopped": True,
                         "mean_plddt": network_output["mean_plddt"],
@@ -729,18 +739,16 @@ class RF3InferenceEngine(BaseInferenceEngine):
                 )
             else:
                 # Store in memory - return list of RF3Output objects
+                assert results is not None
                 results[input_spec.example_id] = rf3_outputs
 
         # merge results across ranks
         self.trainer.fabric.barrier()
         if results is not None and dist.is_initialized():
-            gathered_results = [None] * self.trainer.fabric.world_size
-            dist.all_gather_object(
-                gathered_results, results
-            )  # returns a list of dicts, need to combine them
-            gathered_results = {
-                k: v for result in gathered_results for k, v in result.items()
-            }  # combine the dicts into a single dict
-            results = gathered_results
+            # all_gather_object fills the placeholder list in place with each rank's dict
+            gathered_results: list[Any] = [None] * self.trainer.fabric.world_size
+            dist.all_gather_object(gathered_results, results)
+            # combine the per-rank dicts into a single dict
+            results = {k: v for result in gathered_results for k, v in result.items()}
 
         return results

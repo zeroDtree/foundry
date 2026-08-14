@@ -6,11 +6,11 @@ logger = logging.getLogger(__name__)
 
 
 def weighted_rigid_align(
-    X_L,  # [B, L, 3]
-    X_gt_L,  # [B, L, 3]
-    X_exists_L=None,  # [L]
-    w_L=None,  # [B, L]
-):
+    X_L: torch.Tensor,  # [B, L, 3]
+    X_gt_L: torch.Tensor,  # [B, L, 3]
+    X_exists_L: torch.Tensor | None = None,  # [L]
+    w_L: torch.Tensor | None = None,  # [B, L]
+) -> torch.Tensor:
     """
     Weighted rigid body alignment of X_gt_L onto X_L with weights w_L
     Allows for "moving target" ground truth that is se3 invariant
@@ -61,7 +61,12 @@ def weighted_rigid_align(
 
     R = U @ V
     B, _, _ = X_L.shape
-    F = torch.eye(3, 3, device=X_L.device)[None].tile(
+    # F is the reflection correction for the Kabsch rotation: its last diagonal
+    # entry flips to -1 when det(R) < 0 so R stays a proper rotation. It feeds
+    # `U @ F @ V` below, where matmul requires a shared dtype — U and V carry
+    # X_L's dtype (SVD of an input-derived covariance), so F must too. torch.eye
+    # defaults to float32, so without dtype= float64 inputs raise a mismatch.
+    F = torch.eye(3, 3, device=X_L.device, dtype=X_L.dtype)[None].tile(
         (
             B,
             1,
@@ -79,13 +84,15 @@ def weighted_rigid_align(
     return X_align_L.detach()
 
 
-def get_rmsd(xyz1, xyz2, eps=1e-4):
+def get_rmsd(xyz1: torch.Tensor, xyz2: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     L = xyz1.shape[-2]
-    rmsd = torch.sqrt(torch.sum((xyz2 - xyz1) * (xyz2 - xyz1), axis=(-1, -2)) / L + eps)
+    rmsd = torch.sqrt(torch.sum((xyz2 - xyz1) * (xyz2 - xyz1), dim=(-1, -2)) / L + eps)
     return rmsd
 
 
-def superimpose(xyz1, xyz2, mask, eps=1e-4):
+def superimpose(
+    xyz1: torch.Tensor, xyz2: torch.Tensor, mask: torch.Tensor, eps: float = 1e-4
+) -> None:
     """
     Superimpose xyz1 onto xyz2 using mask
     """

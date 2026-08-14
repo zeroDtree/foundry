@@ -1,6 +1,8 @@
 import gc
+import types
 from collections import defaultdict
-from typing import Any, types
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,10 +14,11 @@ from lightning.fabric.wrappers import (
     _FabricOptimizer,
 )
 from torch import Tensor
+from torch.utils.hooks import RemovableHandle
 
 from foundry.callbacks.callback import BaseCallback
 
-_DEFAULT_STATISTICS = types.MappingProxyType(
+_DEFAULT_STATISTICS: Mapping[str, Callable[..., Any]] = types.MappingProxyType(
     {
         "mean": torch.mean,
         "std": torch.std,
@@ -26,7 +29,7 @@ _DEFAULT_STATISTICS = types.MappingProxyType(
 )
 """Summary statistics to log for gradients, weights, and activations."""
 
-_DEFAULT_HISTOGRAMS = types.MappingProxyType(
+_DEFAULT_HISTOGRAMS: Mapping[str, Callable[..., Any]] = types.MappingProxyType(
     {
         "activations": lambda x: np.histogram(
             x.abs().to(torch.float32).cpu(), bins=40, range=(0, 10)
@@ -63,14 +66,14 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
     def __init__(
         self,
         log_freq: int = 100,
-        log_grads: dict[str, callable] = _DEFAULT_STATISTICS,
-        log_weights: dict[str, callable] = _DEFAULT_STATISTICS,
-        log_activations: dict[str, callable] = _DEFAULT_STATISTICS,
-        log_histograms: dict[str, callable] = _DEFAULT_HISTOGRAMS,
+        log_grads: Mapping[str, Callable[..., Any]] = _DEFAULT_STATISTICS,
+        log_weights: Mapping[str, Callable[..., Any]] = _DEFAULT_STATISTICS,
+        log_activations: Mapping[str, Callable[..., Any]] = _DEFAULT_STATISTICS,
+        log_histograms: Mapping[str, Callable[..., Any]] = _DEFAULT_HISTOGRAMS,
         keep_cache: bool = False,
-        filter_grads: callable = None,
-        filter_weights: callable = None,
-        filter_activations: callable = None,
+        filter_grads: Callable[..., bool] | None = None,
+        filter_weights: Callable[..., bool] | None = None,
+        filter_activations: Callable[..., bool] | None = None,
     ):
         super().__init__()
         self.log_freq = log_freq
@@ -83,14 +86,14 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
         self.filter_weights = filter_weights
         self.filter_activations = filter_activations
 
-        self._hooks = []  # Store activation hooks for cleanup
-        self._temp_cache = {"scalars": {}, "histograms": {}}
-        self._cache = defaultdict(list)
+        self._hooks: list[RemovableHandle] = []  # Store activation hooks for cleanup
+        self._temp_cache: dict[str, Any] = {"scalars": {}, "histograms": {}}
+        self._cache: defaultdict[str, list[Any]] = defaultdict(list)
         if not self.keep_cache:
             self.log_histograms = {}
 
     @rank_zero_only
-    def on_fit_start(self, trainer):
+    def on_fit_start(self, trainer: Any) -> None:
         """Initialize the callback and register activation hooks."""
         # Check that we either have loggers attached or keep_cache is True, otherwise the
         #  data will be computed but not logged.
@@ -101,7 +104,7 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
             )
 
     @rank_zero_only
-    def on_train_batch_start(self, trainer, batch: Any, batch_idx: int):
+    def on_train_batch_start(self, trainer: Any, batch: Any, batch_idx: int) -> None:
         step = trainer.state["global_step"]
         model = trainer.state["model"]
         if (self.log_activations or "activations" in self.log_histograms) and (
@@ -110,7 +113,9 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
             self._register_activation_hooks(model, step)
 
     @rank_zero_only
-    def on_before_optimizer_step(self, trainer, optimizer: _FabricOptimizer, **kwargs):
+    def on_before_optimizer_step(
+        self, trainer: Any, optimizer: _FabricOptimizer, **kwargs: Any
+    ) -> None:
         """Log gradients, weights, and activations before optimizer step."""
         step = trainer.state["global_step"]
 
@@ -140,25 +145,27 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
                     if key.endswith("hist"):
                         self._cache[key].append(value)
 
-    def on_train_batch_end(self, trainer, **kwargs):
+    # Fabric dispatches hooks by keyword, so absorbing the base's positional
+    # outputs/batch/batch_idx via **kwargs is intentional; see TimingCallback.
+    def on_train_batch_end(self, trainer: Any, **kwargs: Any) -> None:  # type: ignore[override]
         """Called at the end of a training batch - clear temporary cache."""
         self._temp_cache["scalars"].clear()
         self._temp_cache["histograms"].clear()
         self._remove_activation_hooks()
 
-    def on_fit_end(self, trainer, **kwargs):
+    def on_fit_end(self, trainer: Any, **kwargs: Any) -> None:
         """Clean up activation hooks at the end of training."""
         self._remove_activation_hooks()
 
-    def on_validation_epoch_start(self, trainer):
+    def on_validation_epoch_start(self, trainer: Any) -> None:
         # Temporarily remove any hooks for validation
         self._remove_activation_hooks()
 
     @rank_zero_only
-    def on_save_checkpoint(self, trainer, state: dict[str, Any]):
+    def on_save_checkpoint(self, trainer: Any, state: dict[str, Any]) -> None:
         self._remove_activation_hooks()
 
-    def _collect_parameter_stats(self, model, step: int):
+    def _collect_parameter_stats(self, model: nn.Module, step: int) -> None:
         """Collect gradient and weight statistics in a single parameter iteration."""
         cache = self._temp_cache  # alias
 
@@ -210,12 +217,12 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
             return True
         return self.filter_activations(name, module_type)
 
-    def _register_activation_hooks(self, model, step: int):
+    def _register_activation_hooks(self, model: nn.Module, step: int) -> None:
         """Register forward hooks to accumulate activations."""
         cache = self._temp_cache  # alias
 
-        def create_activation_hook(name):
-            def hook(module, input, output):
+        def create_activation_hook(name: str) -> Callable[..., None]:
+            def hook(module: nn.Module, input: Any, output: Any) -> None:
                 if isinstance(output, torch.Tensor) and (step % self.log_freq == 0):
                     output = output.detach()
                     for stat_name, stat_fn in self.log_activations.items():
@@ -235,13 +242,13 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
                 hook = module.register_forward_hook(create_activation_hook(name))
                 self._hooks.append(hook)
 
-    def _remove_activation_hooks(self):
+    def _remove_activation_hooks(self) -> None:
         """Remove activation hooks."""
         for hook in self._hooks:
             hook.remove()
         self._hooks.clear()
 
-    def __del__(self):
+    def __del__(self) -> None:
         self._remove_activation_hooks()
         del self._temp_cache
         del self._cache
@@ -251,8 +258,8 @@ class ActivationsGradientsWeightsTracker(BaseCallback):
 def plot_tensor_hist(
     hist_values: Float[Tensor, "N M"],
     name: str = "",
-    norms: Float[Tensor, "N"] = None,
-    steps: Int[Tensor, "N"] = None,
+    norms: Float[Tensor, "N"] | None = None,
+    steps: Int[Tensor, "N"] | None = None,
     log_scale: bool = True,
 ) -> plt.Figure:
     """
@@ -277,21 +284,19 @@ def plot_tensor_hist(
     font_size = 8
     with plt.rc_context({"font.size": font_size}):
         n_steps, n_bins = hist_values.shape  # (N, M)
-        if log_scale:
-            hist_values = np.log1p(hist_values)
-        if steps is None:
-            steps = np.arange(n_steps)
+        display_values = np.log1p(hist_values) if log_scale else hist_values
+        step_labels = np.arange(n_steps) if steps is None else steps
         fig, ax = plt.subplots(
             figsize=(6, 2), constrained_layout=True
         )  # Added constrained_layout
-        mat = ax.matshow(hist_values.T, aspect="auto")
+        mat = ax.matshow(display_values.T, aspect="auto")
         ax.set_xlabel("step")
 
         # Get the automatically determined tick positions from matplotlib
         locs = ax.get_xticks()
         valid_locs = locs[(locs >= 0) & (locs < n_steps)].astype(int)
         ax.set_xticks(valid_locs)
-        ax.set_xticklabels(steps[valid_locs])
+        ax.set_xticklabels(step_labels[valid_locs])
         ax.set_ylabel("bins")
 
         # Create twin axis
@@ -302,7 +307,7 @@ def plot_tensor_hist(
             ax2.set_xlim(0, n_steps - 1)
             ax2.set_ylim(min(norms), max(norms))  # Independent scaling
             ax2.set_xticks(valid_locs)
-            ax2.set_xticklabels(steps[valid_locs])
+            ax2.set_xticklabels(step_labels[valid_locs])
 
         # Add colorbar - constrained_layout will handle spacing automatically
         cbar = plt.colorbar(mat, ax=ax)
@@ -318,14 +323,14 @@ def plot_tensor_hist(
 
 def plot_tensor_stats(
     steps: Int[Tensor, "N"],
-    mean: Float[Tensor, "N"] = None,
-    std: Float[Tensor, "N"] = None,
-    min_val: Float[Tensor, "N"] = None,
-    max_val: Float[Tensor, "N"] = None,
-    norm: Float[Tensor, "N"] = None,
+    mean: Float[Tensor, "N"] | None = None,
+    std: Float[Tensor, "N"] | None = None,
+    min_val: Float[Tensor, "N"] | None = None,
+    max_val: Float[Tensor, "N"] | None = None,
+    norm: Float[Tensor, "N"] | None = None,
     name: str = "",
     height_ratios: tuple[float, float] = (5, 1),
-):
+) -> plt.Figure:
     """
     Plot comprehensive statistics with mean/std/min/max in top panel and norm in bottom panel.
 
